@@ -53,9 +53,7 @@ jobs:
           pip install --upgrade pip
           pip install boto3 "pydantic>=2.9.0,<3.0.0"
 
-      - name: Run Unit Test Suite for All 3 Lambda Handlers      
-        env:
-          PYTHONPATH: .
+      - name: Run Unit Test Suite for All 3 Lambda Handlers 
         run: python -m unittest discover -s tests -t . -p "test_*.py" -v
 
   # ==========================================================================

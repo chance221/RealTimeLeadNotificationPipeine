@@ -10,7 +10,8 @@
 #   - artifacts/lambda_functions/processing/
 # ----------------------------------------------------------------------------
 resource "aws_s3_bucket" "artifacts" {
-  bucket = var.artifact_bucket_name
+  bucket        = var.artifact_bucket_name
+  force_destroy = true
 }
 
 resource "aws_s3_bucket_versioning" "artifacts" {
@@ -132,7 +133,8 @@ resource "aws_s3_object" "processing_lambda_zip" {
 # Stores raw Close webhook leads in `in-process/` and completed leads in `processed/`
 # ----------------------------------------------------------------------------
 resource "aws_s3_bucket" "data_lake" {
-  bucket = var.data_lake_bucket_name
+  bucket        = var.data_lake_bucket_name
+  force_destroy = true
 }
 
 resource "aws_s3_bucket_versioning" "data_lake" {

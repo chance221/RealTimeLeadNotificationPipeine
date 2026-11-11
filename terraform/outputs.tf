@@ -47,3 +47,18 @@ output "ingestion_lambda_arn" {
   description = "ARN of the SQS-polling Ingestion Lambda function"
   value       = aws_lambda_function.ingestion.arn
 }
+
+output "scheduler_lambda_name" {
+  description = "Name of the S3-triggered Scheduler Lambda function"
+  value       = aws_lambda_function.scheduler.function_name
+}
+
+output "processing_lambda_name" {
+  description = "Name of the EventBridge Scheduler-triggered Processing & SES Lambda function"
+  value       = aws_lambda_function.processing.function_name
+}
+
+output "eventbridge_schedule_group_name" {
+  description = "Name of the EventBridge Scheduler group holding 10-minute lead timers"
+  value       = aws_scheduler_schedule_group.lead_timers.name
+}

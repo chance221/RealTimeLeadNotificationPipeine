@@ -86,11 +86,13 @@ jobs:
             -var="data_lake_bucket_name=${{ steps.buckets.outputs.data_lake_bucket }}" \
             -out=tfplan
 
-      - name: Upload Terraform Plan Artifact
+      - name: Upload Terraform Plan & Packaged Lambda Zips
         uses: actions/upload-artifact@v4
         with:
-          name: tfplan
-          path: terraform/tfplan
+          name: tfplan-and-zips
+          path: |
+            terraform/tfplan
+            terraform/build/*.zip
           retention-days: 5
 
   # ==========================================================================
@@ -125,10 +127,10 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
 
-      - name: Download Terraform Plan Artifact
+      - name: Download Terraform Plan & Packaged Lambda Zips
         uses: actions/download-artifact@v4
         with:
-          name: tfplan
+          name: tfplan-and-zips
           path: terraform
 
       - name: Terraform Init

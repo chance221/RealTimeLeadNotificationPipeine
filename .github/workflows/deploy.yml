@@ -51,7 +51,7 @@ jobs:
       - name: Install Test Dependencies (boto3 & pydantic)
         run: |
           pip install --upgrade pip
-          pip install "boto3 pydantic>=2.9.0,<3.0.0"
+          pip install "boto3; pydantic>=2.9.0,<3.0.0"
 
       - name: Run Unit Test Suite for All 3 Lambda Handlers
         run: python -m unittest discover -s tests -p "test_*.py" -v

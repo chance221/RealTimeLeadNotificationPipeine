@@ -121,6 +121,7 @@
       "Action": [
         "lambda:*",
         "scheduler:*",
+        "ses:*",
         "logs:CreateLogGroup",
         "logs:DeleteLogGroup",
         "logs:DescribeLogGroups",

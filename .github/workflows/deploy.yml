@@ -7,6 +7,7 @@ on:
     paths:
       - "terraform/**"
       - "scripts/**"
+      - "tests/**"
       - ".github/workflows/deploy.yml"
   push:
     branches:
@@ -14,6 +15,7 @@ on:
     paths:
       - "terraform/**"
       - "scripts/**"
+      - "tests/**"
       - ".github/workflows/deploy.yml"
   workflow_dispatch:
 
@@ -31,12 +33,37 @@ env:
 
 jobs:
   # ==========================================================================
-  # Job 1: Terraform Format, Init, Validate & Plan
+  # Job 1: Unit Tests (Ingestion, Scheduler, and Processing Lambda Handlers)
+  # Fails the build immediately if any Pydantic contract or handler test fails.
+  # ==========================================================================
+  test:
+    name: Run Lambda Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set Up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Test Dependencies (boto3 & pydantic)
+        run: |
+          pip install --upgrade pip
+          pip install boto3 pydantic>=2.9.0,<3.0.0
+
+      - name: Run Unit Test Suite for All 3 Lambda Handlers
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+
+  # ==========================================================================
+  # Job 2: Terraform Format, Init, Validate & Plan
   # Uses `environment: production` so GitHub OIDC presents the `environment:production`
   # subject claim and can read the `AWS_ROLE_ARN` environment secret.
   # ==========================================================================
   plan:
     name: Terraform Plan
+    needs: test
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -55,6 +82,29 @@ jobs:
         run: |
           echo "artifact_bucket=$(echo "${ARTIFACT_BUCKET_NAME}" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
           echo "data_lake_bucket=$(echo "${DATA_LAKE_BUCKET_NAME}" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Set Up Python 3.12 & Build Lambda Packages (with Pydantic)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Lambda Dependencies & Stage Source Files
+        shell: bash
+        run: |
+          for fn in ingestion scheduler processing; do
+            mkdir -p "terraform/dist/${fn}"
+            cp -r scripts/${fn}/* "terraform/dist/${fn}/"
+            if [ -f "scripts/${fn}/requirements.txt" ]; then
+              pip install \
+                --requirement "scripts/${fn}/requirements.txt" \
+                --target "terraform/dist/${fn}" \
+                --platform manylinux2014_x86_64 \
+                --implementation cp \
+                --python-version 3.12 \
+                --only-binary=:all: \
+                --upgrade
+            fi
+          done
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3

@@ -8,13 +8,24 @@
 variable "ses_sender_email" {
   description = "Verified Amazon SES sender email address (From)"
   type        = string
-  default     = ""
+  default     = "intelectual221@gmail.com"
 }
 
 variable "ses_recipient_email" {
   description = "Verified Amazon SES recipient email address (To)"
   type        = string
-  default     = ""
+  default     = "intelectual221@gmail.com"
+}
+
+variable "lead_owner_base_url" {
+  description = "Base URL of the public S3 bucket containing {lead_id}.json lead owner lookup files"
+  type        = string
+  default     = "https://dea-lead-owner.s3.us-east-1.amazonaws.com"
+}
+
+# Register `intelectual221@gmail.com` in Amazon SES (triggers an AWS verification email to your inbox)
+resource "aws_ses_email_identity" "lead_notification_email" {
+  email = var.ses_recipient_email
 }
 
 resource "aws_cloudwatch_log_group" "processing_lambda" {
@@ -130,6 +141,7 @@ resource "aws_lambda_function" "processing" {
       DATA_LAKE_BUCKET_NAME = aws_s3_bucket.data_lake.id
       IN_PROCESS_PREFIX     = "in-process"
       PROCESSED_PREFIX      = "processed"
+      LEAD_OWNER_BASE_URL   = var.lead_owner_base_url
       SES_SENDER_EMAIL      = var.ses_sender_email
       SES_RECIPIENT_EMAIL   = var.ses_recipient_email
     }

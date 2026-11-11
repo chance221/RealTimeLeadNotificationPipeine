@@ -88,10 +88,11 @@ resource "aws_s3_object" "artifacts_processing_prefix" {
   content = ""
 }
 
-# Package each Lambda directory into a .zip and upload to the SHA-versioned Artifacts S3 folder
+# Package each Lambda directory (including Linux x86_64 dependencies installed into `terraform/dist/{fn}`)
+# into a .zip and upload to the SHA-versioned Artifacts S3 folder
 data "archive_file" "ingestion_zip" {
   type        = "zip"
-  source_dir  = "${path.module}/../scripts/ingestion"
+  source_dir  = "${path.module}/dist/ingestion"
   output_path = "${path.module}/build/ingestion.zip"
 }
 
@@ -104,7 +105,7 @@ resource "aws_s3_object" "ingestion_lambda_zip" {
 
 data "archive_file" "scheduler_zip" {
   type        = "zip"
-  source_dir  = "${path.module}/../scripts/scheduler"
+  source_dir  = "${path.module}/dist/scheduler"
   output_path = "${path.module}/build/scheduler.zip"
 }
 
@@ -117,7 +118,7 @@ resource "aws_s3_object" "scheduler_lambda_zip" {
 
 data "archive_file" "processing_zip" {
   type        = "zip"
-  source_dir  = "${path.module}/../scripts/processing"
+  source_dir  = "${path.module}/dist/processing"
   output_path = "${path.module}/build/processing.zip"
 }
 

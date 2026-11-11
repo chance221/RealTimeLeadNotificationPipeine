@@ -1,107 +1,67 @@
 """
 1. Ingestion Lambda Function
-Polls the SQS Processing Queue and writes raw Close webhook JSON payloads
-to the S3 Data Lake bucket (`realtimecloseapimessages`) under the `in-process/` prefix.
+Polls the SQS Processing Queue, validates the Close CRM webhook payload using
+Pydantic (`CloseWebhookEnvelope` / `CloseWebhookBody`), and writes ONLY the
+validated `body` JSON to the S3 Data Lake bucket (`real-time-close-api-messages`)
+under `in-process/crm_event_{lead_id}.json`.
 
 Senior Engineering Highlights:
-- Uses `ReportBatchItemFailures` (Partial Batch Response) so only failed records
-  in an SQS batch are retried and eventually routed to the Dead-Letter Queue (DLQ),
-  preventing duplicate S3 writes for records in the same batch that succeeded.
-- Enriches the raw webhook payload with ingestion metadata (`sqs_message_id`,
-  `ingested_at_utc`) while preserving the exact immutable `raw_payload` from Close CRM.
+- Strict schema validation at the ingestion boundary via Pydantic v2 (`models.py`).
+- Preserves all extra Close CRM fields (`extra="allow"`) while guaranteeing required
+  fields (`subscription_id`, `event.id`, `event.lead_id`, `event.data.display_name`,
+  `event.data.status_label`, `event.data.date_created`) exist and are non-empty.
+- Uses `ReportBatchItemFailures` (Partial Batch Response) so any record failing
+  Pydantic `ValidationError` is retried and routed to the Dead-Letter Queue (DLQ).
 """
 
 import json
 import logging
 import os
-from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 import boto3
 from botocore.exceptions import ClientError
+from pydantic import ValidationError
+
+from models import CloseWebhookBody, validate_incoming_webhook
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 s3_client = boto3.client("s3")
 
-DATA_LAKE_BUCKET = os.environ.get("DATA_LAKE_BUCKET_NAME", "realtimecloseapimessages")
+DATA_LAKE_BUCKET = os.environ.get("DATA_LAKE_BUCKET_NAME", "real-time-close-api-messages")
 IN_PROCESS_PREFIX = os.environ.get("IN_PROCESS_PREFIX", "in-process")
-
-
-def _extract_lead_id(payload: Dict[str, Any], fallback_id: str) -> str:
-    """
-    Extracts the lead_id from a Close CRM webhook payload.
-    Close webhook payloads typically structure data under `event.data.id` or `event.lead_id`,
-    or top-level `lead_id` / `id`. Falls back to the SQS messageId if not present.
-    """
-    event_obj = payload.get("event", {})
-    if isinstance(event_obj, dict):
-        if event_obj.get("lead_id"):
-            return str(event_obj["lead_id"])
-        data_obj = event_obj.get("data", {})
-        if isinstance(data_obj, dict) and data_obj.get("id"):
-            return str(data_obj["id"])
-        if isinstance(data_obj, dict) and data_obj.get("lead_id"):
-            return str(data_obj["lead_id"])
-
-    for key in ("lead_id", "id"):
-        if payload.get(key):
-            return str(payload[key])
-
-    return fallback_id
 
 
 def _process_single_record(record: Dict[str, Any]) -> str:
     """
-    Parses a single SQS record and writes it as a JSON object into
-    `s3://<DATA_LAKE_BUCKET>/in-process/<lead_id>_<message_id>.json`.
+    Parses a single SQS record, validates the Close CRM webhook payload via Pydantic,
+    and writes ONLY the `body` portion to `s3://<DATA_LAKE_BUCKET>/in-process/crm_event_{lead_id}.json`.
     Returns the S3 object key written.
     """
     message_id = record["messageId"]
-    raw_body = record.get("body", "")
+    raw_sqs_body = record.get("body", "")
 
-    if not raw_body or not raw_body.strip():
+    if not raw_sqs_body or not raw_sqs_body.strip():
         raise ValueError(f"SQS message {message_id} has an empty body")
 
-    # Validate that the incoming webhook payload is valid JSON
-    try:
-        parsed_payload = json.loads(raw_body)
-    except json.JSONDecodeError as exc:
-        logger.error("Malformed JSON in SQS message %s: %s", message_id, exc)
-        raise ValueError(f"Malformed JSON in SQS message {message_id}") from exc
+    # Validate incoming JSON (either API Gateway envelope with `body` or direct Close body)
+    validated_body: CloseWebhookBody = validate_incoming_webhook(raw_sqs_body)
+    lead_id = validated_body.event.lead_id
 
-    if not isinstance(parsed_payload, dict):
-        raise ValueError(f"Expected JSON object in SQS message {message_id}, got {type(parsed_payload).__name__}")
-
-    lead_id = _extract_lead_id(parsed_payload, fallback_id=message_id)
-    now_utc = datetime.now(timezone.utc)
-    timestamp_str = now_utc.strftime("%Y%m%dT%H%M%SZ")
-
-    # Deterministic, collision-free S3 key under the `in-process/` folder
-    s3_key = f"{IN_PROCESS_PREFIX.rstrip('/')}/{lead_id}_{message_id}.json"
-
-    # Envelope containing both ingestion audit metadata and the raw Close payload
-    document = {
-        "metadata": {
-            "lead_id": lead_id,
-            "sqs_message_id": message_id,
-            "ingested_at_utc": now_utc.isoformat(),
-            "ingest_timestamp_compact": timestamp_str,
-            "source": "close_crm_webhook",
-        },
-        "payload": parsed_payload,
-    }
+    # Save strictly as `in-process/crm_event_{lead_id}.json` containing only the validated CRM body
+    s3_key = f"{IN_PROCESS_PREFIX.rstrip('/')}/crm_event_{lead_id}.json"
 
     s3_client.put_object(
         Bucket=DATA_LAKE_BUCKET,
         Key=s3_key,
-        Body=json.dumps(document, indent=2).encode("utf-8"),
+        Body=json.dumps(validated_body.model_dump(mode="json"), indent=2).encode("utf-8"),
         ContentType="application/json",
     )
 
     logger.info(
-        "Successfully wrote lead_id=%s (messageId=%s) to s3://%s/%s",
+        "Validated and wrote CRM body for lead_id=%s (messageId=%s) to s3://%s/%s",
         lead_id,
         message_id,
         DATA_LAKE_BUCKET,
@@ -125,6 +85,13 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, List[Dict[s
         message_id = record.get("messageId", "unknown")
         try:
             _process_single_record(record)
+        except ValidationError as exc:
+            logger.error(
+                "Pydantic schema validation failed for SQS messageId=%s: %s",
+                message_id,
+                exc.json(),
+            )
+            batch_item_failures.append({"itemIdentifier": message_id})
         except (ValueError, ClientError, Exception) as exc:
             logger.exception(
                 "Failed to ingest SQS messageId=%s. Marking for retry/DLQ: %s",

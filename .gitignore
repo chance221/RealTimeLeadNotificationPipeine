@@ -35,6 +35,8 @@ override.tf.json
 
 # Ignore local build/packaging directories and Python cache
 build/
+dist/
+terraform/dist/
 *.zip
 __pycache__/
 *.py[cod]

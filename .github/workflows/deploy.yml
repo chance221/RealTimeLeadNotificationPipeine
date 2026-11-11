@@ -20,8 +20,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  id-token: write      # Required for requesting the AWS OIDC JWT token
-  contents: read       # Required for checking out the repository
+  id-token: write # Required for requesting the AWS OIDC JWT token
+  contents: read # Required for checking out the repository
   pull-requests: write # Required if adding PR plan comments later
 
 env:
@@ -30,6 +30,7 @@ env:
   DATA_LAKE_BUCKET_NAME: ${{ vars.DATA_LAKE_BUCKET_NAME || 'real-time-close-api-messages' }}
   GIT_COMMIT_SHA: ${{ github.sha }}
   TF_VERSION: "1.10.5"
+  PYTHONPATH: .
 
 jobs:
   # ==========================================================================

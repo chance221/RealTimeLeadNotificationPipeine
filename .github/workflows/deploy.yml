@@ -30,7 +30,6 @@ env:
   DATA_LAKE_BUCKET_NAME: ${{ vars.DATA_LAKE_BUCKET_NAME || 'real-time-close-api-messages' }}
   GIT_COMMIT_SHA: ${{ github.sha }}
   TF_VERSION: "1.10.5"
-  PYTHONPATH: .
 
 jobs:
   # ==========================================================================
@@ -54,8 +53,10 @@ jobs:
           pip install --upgrade pip
           pip install boto3 "pydantic>=2.9.0,<3.0.0"
 
-      - name: Run Unit Test Suite for All 3 Lambda Handlers
-        run: python -m unittest discover -s tests -p "test_*.py" -v
+      - name: Run Unit Test Suite for All 3 Lambda Handlers      
+        env:
+          PYTHONPATH: .
+        run: python -m unittest discover -s tests -t . -p "test_*.py" -v
 
   # ==========================================================================
   # Job 2: Terraform Format, Init, Validate & Plan

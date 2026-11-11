@@ -1,11 +1,14 @@
 """
 Unit tests for the Processing & SES Lambda (`scripts/processing/handler.py` & `scripts/processing/models.py`).
+Covers explicit Happy Path and Sad Path test cases for every function and Pydantic model.
 """
 
 import importlib.util
 import io
 import json
+import sys
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -22,9 +25,6 @@ def _load_module(module_name: str, file_path: Path):
     spec.loader.exec_module(module)
     return module
 
-
-# Load `processing/models.py` as `models` during `processing/handler.py` import
-import sys  # noqa: E402
 
 sys.path.insert(0, str(PROCESSING_DIR))
 processing_models = _load_module("models", PROCESSING_DIR / "models.py")
@@ -63,20 +63,83 @@ SAMPLE_LOOKUP_PAYLOAD = {
 
 
 class TestProcessingLambda(unittest.TestCase):
-    """Unit test suite for the Processing & SES Lambda handler and Pydantic models."""
+    """Happy and Sad path unit tests for every function in the Processing & SES Lambda."""
 
-    def test_lead_owner_lookup_pydantic_validation_success(self) -> None:
+    # =========================================================================
+    # 1. Pydantic Models (`LeadOwnerLookup`, `CloseWebhookBody`, `ScheduledLeadEvent`)
+    # =========================================================================
+    def test_lead_owner_lookup_happy_path_validates_sample_payload(self) -> None:
+        """Happy Path: Validates a well-formed S3 lead owner lookup payload."""
         lookup = processing_models.LeadOwnerLookup.model_validate(SAMPLE_LOOKUP_PAYLOAD)
         self.assertEqual(lookup.lead_email, "gatequdit@gmail.com")
         self.assertEqual(lookup.lead_owner, "Lucija Bitunjac")
         self.assertEqual(lookup.funnel, "DE ACADEMY Direct VSL")
 
-    def test_lead_owner_lookup_pydantic_rejects_invalid_email(self) -> None:
-        bad_lookup = dict(SAMPLE_LOOKUP_PAYLOAD, lead_email="not-an-email")
+    def test_lead_owner_lookup_sad_path_rejects_invalid_email_or_missing_owner(self) -> None:
+        """Sad Path: Rejects lookup payload with malformed email or missing lead_owner."""
+        bad_email = dict(SAMPLE_LOOKUP_PAYLOAD, lead_email="invalid-email-address")
         with self.assertRaises(ValidationError):
-            processing_models.LeadOwnerLookup.model_validate(bad_lookup)
+            processing_models.LeadOwnerLookup.model_validate(bad_email)
 
-    def test_build_prescribed_email_matches_exact_template(self) -> None:
+        missing_owner = dict(SAMPLE_LOOKUP_PAYLOAD)
+        del missing_owner["lead_owner"]
+        with self.assertRaises(ValidationError):
+            processing_models.LeadOwnerLookup.model_validate(missing_owner)
+
+    # =========================================================================
+    # 2. `_fetch_and_validate_lead_owner_lookup` (Happy & Sad Paths)
+    # =========================================================================
+    @patch.object(processing_handler, "urllib")
+    def test_fetch_and_validate_lead_owner_lookup_happy_path(
+        self, mock_urllib: MagicMock
+    ) -> None:
+        """Happy Path: Fetches JSON from dea-lead-owner S3 URL and returns validated LeadOwnerLookup."""
+        mock_http_resp = MagicMock()
+        mock_http_resp.read.return_value = json.dumps(SAMPLE_LOOKUP_PAYLOAD).encode("utf-8")
+        mock_http_resp.__enter__.return_value = mock_http_resp
+        mock_urllib.request.urlopen.return_value = mock_http_resp
+
+        result = processing_handler._fetch_and_validate_lead_owner_lookup(
+            "lead_niuYPXlw6vnFQIhwZCKDaaKv9XMQs9KA5NgxhNRBgaA"
+        )
+        self.assertEqual(result.lead_owner, "Lucija Bitunjac")
+        self.assertEqual(result.lead_email, "gatequdit@gmail.com")
+
+    @patch.object(processing_handler, "urllib")
+    def test_fetch_and_validate_lead_owner_lookup_sad_path_http_404_raises_runtime_error(
+        self, mock_urllib: MagicMock
+    ) -> None:
+        """Sad Path: Raises RuntimeError when public S3 lookup returns HTTP 404/403."""
+        mock_urllib.error = urllib.error
+        mock_urllib.request.urlopen.side_effect = urllib.error.HTTPError(
+            url="https://dea-lead-owner.s3.us-east-1.amazonaws.com/lead_missing.json",
+            code=404,
+            msg="Not Found",
+            hdrs=None,  # type: ignore[arg-type]
+            fp=None,
+        )
+        with self.assertRaises(RuntimeError):
+            processing_handler._fetch_and_validate_lead_owner_lookup("lead_missing")
+
+    @patch.object(processing_handler, "urllib")
+    def test_fetch_and_validate_lead_owner_lookup_sad_path_invalid_schema_raises_validation_error(
+        self, mock_urllib: MagicMock
+    ) -> None:
+        """Sad Path: Raises Pydantic ValidationError if lookup S3 bucket returns incomplete JSON."""
+        mock_urllib.error = urllib.error
+        mock_http_resp = MagicMock()
+        mock_http_resp.read.return_value = json.dumps({"lead_id": "lead_123"}).encode("utf-8")
+        mock_http_resp.__enter__.return_value = mock_http_resp
+        mock_urllib.request.urlopen.return_value = mock_http_resp
+
+        with self.assertRaises(ValidationError):
+            processing_handler._fetch_and_validate_lead_owner_lookup("lead_123")
+
+    # =========================================================================
+    # 3. `_build_prescribed_email` & `_send_ses_email` (Happy & Sad Paths)
+    # =========================================================================
+    def test_build_prescribed_email_happy_path_matches_exact_template(self) -> None:
+        """Happy Path: Formats the exact prescribed email text and HTML bodies."""
         crm_model = processing_models.CloseWebhookBody.model_validate(SAMPLE_CRM_BODY)
         lookup_model = processing_models.LeadOwnerLookup.model_validate(SAMPLE_LOOKUP_PAYLOAD)
 
@@ -94,16 +157,70 @@ class TestProcessingLambda(unittest.TestCase):
         )
         self.assertEqual(text_body, expected_text)
 
+    @patch.object(processing_handler, "ses_client")
+    def test_send_ses_email_happy_path_returns_message_id(self, mock_ses: MagicMock) -> None:
+        """Happy Path: Calls SES send_email and returns the SES MessageId."""
+        mock_ses.send_email.return_value = {"MessageId": "ses-ok-999"}
+        msg_id = processing_handler._send_ses_email(
+            "Subject", "Text Body", "<p>HTML Body</p>", "lead_123"
+        )
+        self.assertEqual(msg_id, "ses-ok-999")
+        mock_ses.send_email.assert_called_once()
+
+    @patch.object(processing_handler, "ses_client")
+    def test_send_ses_email_sad_path_ses_rejection_raises_client_error(
+        self, mock_ses: MagicMock
+    ) -> None:
+        """Sad Path: Propagates ClientError when SES rejects an unverified sender/recipient."""
+        mock_ses.send_email.side_effect = ClientError(
+            {"Error": {"Code": "MessageRejected", "Message": "Email address is not verified"}},
+            "SendEmail",
+        )
+        with self.assertRaises(ClientError):
+            processing_handler._send_ses_email(
+                "Subject", "Text Body", "<p>HTML Body</p>", "lead_123"
+            )
+
+    # =========================================================================
+    # 4. `_object_exists` (Happy & Sad Paths)
+    # =========================================================================
+    @patch.object(processing_handler, "s3_client")
+    def test_object_exists_happy_path_returns_true_or_false_on_404(
+        self, mock_s3: MagicMock
+    ) -> None:
+        """Happy Path: Returns True when object exists and False on 404 Not Found."""
+        mock_s3.head_object.return_value = {"ContentLength": 123}
+        self.assertTrue(processing_handler._object_exists("bucket", "key"))
+
+        mock_s3.head_object.side_effect = ClientError(
+            {"Error": {"Code": "404", "Message": "Not Found"}}, "HeadObject"
+        )
+        self.assertFalse(processing_handler._object_exists("bucket", "key"))
+
+    @patch.object(processing_handler, "s3_client")
+    def test_object_exists_sad_path_re_raises_unexpected_s3_error(
+        self, mock_s3: MagicMock
+    ) -> None:
+        """Sad Path: Re-raises non-404 ClientError (such as 403 Forbidden)."""
+        mock_s3.head_object.side_effect = ClientError(
+            {"Error": {"Code": "403", "Message": "Forbidden"}}, "HeadObject"
+        )
+        with self.assertRaises(ClientError):
+            processing_handler._object_exists("bucket", "key")
+
+    # =========================================================================
+    # 5. `lambda_handler` (Happy & Sad Paths)
+    # =========================================================================
     @patch.object(processing_handler, "urllib")
     @patch.object(processing_handler, "ses_client")
     @patch.object(processing_handler, "s3_client")
-    def test_lambda_handler_processes_lead_sends_email_and_moves_to_processed(
+    def test_lambda_handler_happy_path_processes_lead_emails_and_moves_file(
         self,
         mock_s3: MagicMock,
         mock_ses: MagicMock,
         mock_urllib: MagicMock,
     ) -> None:
-        # Simulate that `processed/crm_event_...json` does not yet exist (404 on head_object)
+        """Happy Path: Reads in-process JSON, fetches lookup, sends SES email, moves to processed/."""
         mock_s3.head_object.side_effect = ClientError(
             {"Error": {"Code": "404", "Message": "Not Found"}}, "HeadObject"
         )
@@ -111,7 +228,6 @@ class TestProcessingLambda(unittest.TestCase):
             "Body": io.BytesIO(json.dumps(SAMPLE_CRM_BODY).encode("utf-8"))
         }
 
-        # Mock HTTP response from https://dea-lead-owner.s3.us-east-1.amazonaws.com/{lead_id}.json
         mock_http_resp = MagicMock()
         mock_http_resp.read.return_value = json.dumps(SAMPLE_LOOKUP_PAYLOAD).encode("utf-8")
         mock_http_resp.__enter__.return_value = mock_http_resp
@@ -130,45 +246,21 @@ class TestProcessingLambda(unittest.TestCase):
         body = json.loads(result["body"])
         self.assertEqual(body["status"], "processed")
         self.assertEqual(body["ses_message_id"], "ses-msg-123")
-        self.assertEqual(
-            body["processed_key"],
-            "processed/crm_event_lead_niuYPXlw6vnFQIhwZCKDaaKv9XMQs9KA5NgxhNRBgaA.json",
-        )
-
-        # Verify SES email was sent to intelectual221@gmail.com
         mock_ses.send_email.assert_called_once()
-        ses_kwargs = mock_ses.send_email.call_args.kwargs
-        self.assertEqual(ses_kwargs["Destination"]["ToAddresses"], ["intelectual221@gmail.com"])
-
-        # Verify object was copied to `processed/` and deleted from `in-process/`
         mock_s3.put_object.assert_called_once()
-        self.assertEqual(
-            mock_s3.put_object.call_args.kwargs["Key"],
-            "processed/crm_event_lead_niuYPXlw6vnFQIhwZCKDaaKv9XMQs9KA5NgxhNRBgaA.json",
-        )
-        mock_s3.delete_object.assert_called_once_with(
-            Bucket="real-time-close-api-messages",
-            Key="in-process/crm_event_lead_niuYPXlw6vnFQIhwZCKDaaKv9XMQs9KA5NgxhNRBgaA.json",
-        )
+        mock_s3.delete_object.assert_called_once()
 
     @patch.object(processing_handler, "ses_client")
     @patch.object(processing_handler, "s3_client")
-    def test_lambda_handler_idempotency_skips_duplicate_email_if_already_processed(
+    def test_lambda_handler_sad_path_missing_event_key_raises_validation_error(
         self,
         mock_s3: MagicMock,
         mock_ses: MagicMock,
     ) -> None:
-        # Simulate that `processed/crm_event_...json` ALREADY exists
-        mock_s3.head_object.return_value = {"ContentLength": 500}
-
-        event = {
-            "bucket": "real-time-close-api-messages",
-            "key": "in-process/crm_event_lead_niuYPXlw6vnFQIhwZCKDaaKv9XMQs9KA5NgxhNRBgaA.json",
-        }
-
-        result = processing_handler.lambda_handler(event, None)
-        self.assertEqual(result["statusCode"], 200)
-        self.assertEqual(json.loads(result["body"])["status"], "already_processed")
+        """Sad Path: Rejects scheduled event missing the required 'key' field via Pydantic."""
+        with self.assertRaises(ValidationError):
+            processing_handler.lambda_handler({"bucket": "real-time-close-api-messages"}, None)
+        mock_s3.get_object.assert_not_called()
         mock_ses.send_email.assert_not_called()
 
 

@@ -1,24 +1,33 @@
 """
 Unit tests for the Ingestion Lambda (`scripts/ingestion/handler.py` & `scripts/ingestion/models.py`).
+Covers explicit Happy Path and Sad Path test cases for every function and validator.
 """
 
 import importlib.util
 import json
-import os
 import sys
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from botocore.exceptions import ClientError
 from pydantic import ValidationError
 
-# Load the ingestion module and its models in isolation
 INGESTION_DIR = Path(__file__).resolve().parents[1] / "scripts" / "ingestion"
+
+
+def _load_module(module_name: str, file_path: Path):
+    spec = importlib.util.spec_from_file_location(module_name, file_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 sys.path.insert(0, str(INGESTION_DIR))
-
-import models as ingestion_models  # noqa: E402
-import handler as ingestion_handler  # noqa: E402
-
+ingestion_models = _load_module("models", INGESTION_DIR / "models.py")
+sys.modules["models"] = ingestion_models
+ingestion_handler = _load_module("ingestion_handler", INGESTION_DIR / "handler.py")
 sys.path.remove(str(INGESTION_DIR))
 
 
@@ -74,9 +83,13 @@ SAMPLE_APIGW_ENVELOPE = {
 
 
 class TestIngestionLambda(unittest.TestCase):
-    """Unit test suite for the Ingestion Lambda handler and Pydantic models."""
+    """Happy and Sad path unit tests for every function in the Ingestion Lambda."""
 
-    def test_validate_incoming_webhook_unwraps_apigw_envelope(self) -> None:
+    # =========================================================================
+    # 1. `validate_incoming_webhook` & Pydantic Models (Happy & Sad Paths)
+    # =========================================================================
+    def test_validate_incoming_webhook_happy_path_apigw_envelope(self) -> None:
+        """Happy Path: Unwraps API Gateway envelope (with dict or JSON-string body) and validates."""
         validated = ingestion_models.validate_incoming_webhook(SAMPLE_APIGW_ENVELOPE)
         self.assertEqual(
             validated.event.lead_id, "lead_niuYPXlw6vnFQIhwZCKDaaKv9XMQs9KA5NgxhNRBgaA"
@@ -84,55 +97,102 @@ class TestIngestionLambda(unittest.TestCase):
         self.assertEqual(validated.event.data.display_name, "Lowell Bast")
         self.assertEqual(validated.subscription_id, "whsub_1zwvQVQOBPFqrH6xXJEvFJ")
 
-    def test_validate_incoming_webhook_accepts_direct_crm_body(self) -> None:
+    def test_validate_incoming_webhook_happy_path_direct_crm_body(self) -> None:
+        """Happy Path: Validates a direct Close CRM body JSON string."""
         validated = ingestion_models.validate_incoming_webhook(json.dumps(SAMPLE_CRM_BODY))
         self.assertEqual(
             validated.event.lead_id, "lead_niuYPXlw6vnFQIhwZCKDaaKv9XMQs9KA5NgxhNRBgaA"
         )
 
-    def test_pydantic_rejects_invalid_lead_id_prefix(self) -> None:
+    def test_validate_incoming_webhook_sad_path_invalid_lead_id_prefix(self) -> None:
+        """Sad Path: Rejects payload where lead_id does not start with 'lead_'."""
         bad_payload = json.loads(json.dumps(SAMPLE_CRM_BODY))
         bad_payload["event"]["lead_id"] = "invalid_prefix_123"
         with self.assertRaises(ValidationError):
             ingestion_models.validate_incoming_webhook(bad_payload)
 
-    def test_pydantic_rejects_missing_required_fields(self) -> None:
+    def test_validate_incoming_webhook_sad_path_missing_required_fields(self) -> None:
+        """Sad Path: Rejects payload missing required fields like display_name or status_label."""
         bad_payload = json.loads(json.dumps(SAMPLE_CRM_BODY))
         del bad_payload["event"]["data"]["display_name"]
         with self.assertRaises(ValidationError):
             ingestion_models.validate_incoming_webhook(bad_payload)
 
+    def test_validate_incoming_webhook_sad_path_non_dict_json(self) -> None:
+        """Sad Path: Rejects a JSON list or primitive instead of a JSON object."""
+        with self.assertRaises(ValueError):
+            ingestion_models.validate_incoming_webhook('["not", "an", "object"]')
+
+    def test_validate_incoming_webhook_sad_path_corrupt_inner_body_string(self) -> None:
+        """Sad Path: Rejects an API Gateway envelope whose inner 'body' string is invalid JSON."""
+        bad_envelope = {"resource": "/crm", "body": "{corrupt-json"}
+        with self.assertRaises(ValidationError):
+            ingestion_models.validate_incoming_webhook(bad_envelope)
+
+    # =========================================================================
+    # 2. `_process_single_record` (Happy & Sad Paths)
+    # =========================================================================
     @patch.object(ingestion_handler, "s3_client")
-    def test_lambda_handler_writes_crm_event_file_to_s3(self, mock_s3: MagicMock) -> None:
-        sqs_event = {
-            "Records": [
-                {
-                    "messageId": "msg-001",
-                    "body": json.dumps(SAMPLE_APIGW_ENVELOPE),
-                }
-            ]
-        }
-
-        response = ingestion_handler.lambda_handler(sqs_event, None)
-        self.assertEqual(response, {"batchItemFailures": []})
-
-        mock_s3.put_object.assert_called_once()
-        call_kwargs = mock_s3.put_object.call_args.kwargs
-        self.assertEqual(
-            call_kwargs["Key"],
-            "in-process/crm_event_lead_niuYPXlw6vnFQIhwZCKDaaKv9XMQs9KA5NgxhNRBgaA.json",
-        )
-        saved_json = json.loads(call_kwargs["Body"].decode("utf-8"))
-        # Verify ONLY the body (subscription_id + event) is saved, not the outer API Gateway headers
-        self.assertIn("subscription_id", saved_json)
-        self.assertIn("event", saved_json)
-        self.assertNotIn("headers", saved_json)
-        self.assertEqual(saved_json["event"]["data"]["display_name"], "Lowell Bast")
-
-    @patch.object(ingestion_handler, "s3_client")
-    def test_lambda_handler_reports_partial_batch_failures_for_dlq(
+    def test_process_single_record_happy_path_writes_only_body_to_s3(
         self, mock_s3: MagicMock
     ) -> None:
+        """Happy Path: Extracts CRM body and writes `in-process/crm_event_{lead_id}.json` to S3."""
+        record = {"messageId": "msg-100", "body": json.dumps(SAMPLE_APIGW_ENVELOPE)}
+        s3_key = ingestion_handler._process_single_record(record)
+
+        self.assertEqual(
+            s3_key,
+            "in-process/crm_event_lead_niuYPXlw6vnFQIhwZCKDaaKv9XMQs9KA5NgxhNRBgaA.json",
+        )
+        mock_s3.put_object.assert_called_once()
+        saved_body = json.loads(mock_s3.put_object.call_args.kwargs["Body"].decode("utf-8"))
+        self.assertIn("subscription_id", saved_body)
+        self.assertIn("event", saved_body)
+        self.assertNotIn("headers", saved_body)
+
+    @patch.object(ingestion_handler, "s3_client")
+    def test_process_single_record_sad_path_empty_body_raises_value_error(
+        self, mock_s3: MagicMock
+    ) -> None:
+        """Sad Path: Raises ValueError when SQS record body is empty or whitespace."""
+        with self.assertRaises(ValueError):
+            ingestion_handler._process_single_record({"messageId": "msg-empty", "body": "   "})
+        mock_s3.put_object.assert_not_called()
+
+    @patch.object(ingestion_handler, "s3_client")
+    def test_process_single_record_sad_path_s3_client_error_propagates(
+        self, mock_s3: MagicMock
+    ) -> None:
+        """Sad Path: Propagates boto3 ClientError when S3 PutObject fails."""
+        mock_s3.put_object.side_effect = ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": "Access Denied"}}, "PutObject"
+        )
+        record = {"messageId": "msg-s3-fail", "body": json.dumps(SAMPLE_CRM_BODY)}
+        with self.assertRaises(ClientError):
+            ingestion_handler._process_single_record(record)
+
+    # =========================================================================
+    # 3. `lambda_handler` (Happy & Sad Paths)
+    # =========================================================================
+    @patch.object(ingestion_handler, "s3_client")
+    def test_lambda_handler_happy_path_returns_empty_batch_failures(
+        self, mock_s3: MagicMock
+    ) -> None:
+        """Happy Path: Processes all valid SQS records and returns empty batchItemFailures."""
+        sqs_event = {
+            "Records": [
+                {"messageId": "msg-001", "body": json.dumps(SAMPLE_APIGW_ENVELOPE)},
+            ]
+        }
+        response = ingestion_handler.lambda_handler(sqs_event, None)
+        self.assertEqual(response, {"batchItemFailures": []})
+        mock_s3.put_object.assert_called_once()
+
+    @patch.object(ingestion_handler, "s3_client")
+    def test_lambda_handler_sad_path_partial_batch_failures_for_dlq(
+        self, mock_s3: MagicMock
+    ) -> None:
+        """Sad Path: Captures malformed JSON and Pydantic ValidationError records in batchItemFailures."""
         sqs_event = {
             "Records": [
                 {"messageId": "msg-valid", "body": json.dumps(SAMPLE_CRM_BODY)},
@@ -154,7 +214,6 @@ class TestIngestionLambda(unittest.TestCase):
                 ]
             },
         )
-        # Valid message was still written to S3
         mock_s3.put_object.assert_called_once()
 
 

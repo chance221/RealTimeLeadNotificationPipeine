@@ -1,0 +1,135 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "S3ArtifactAndDataLakeBucketManagement",
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateBucket",
+        "s3:DeleteBucket",
+        "s3:ListBucket",
+        "s3:ListBucketVersions",
+        "s3:GetBucketLocation",
+        "s3:GetBucketVersioning",
+        "s3:PutBucketVersioning",
+        "s3:GetEncryptionConfiguration",
+        "s3:PutEncryptionConfiguration",
+        "s3:GetBucketPublicAccessBlock",
+        "s3:PutBucketPublicAccessBlock",
+        "s3:GetBucketPolicy",
+        "s3:PutBucketPolicy",
+        "s3:DeleteBucketPolicy",
+        "s3:GetBucketNotification",
+        "s3:PutBucketNotification",
+        "s3:GetBucketTagging",
+        "s3:PutBucketTagging",
+        "s3:GetBucketAcl",
+        "s3:GetBucketCORS",
+        "s3:GetBucketWebsite",
+        "s3:GetAccelerateConfiguration",
+        "s3:GetBucketRequestPayment",
+        "s3:GetBucketLogging",
+        "s3:GetLifecycleConfiguration",
+        "s3:PutLifecycleConfiguration",
+        "s3:GetReplicationConfiguration",
+        "s3:GetBucketObjectLockConfiguration"
+      ],
+      "Resource": [
+        "arn:aws:s3:::real-time-close-api-scripts*",
+        "arn:aws:s3:::real-time-close-api-messages*",
+        "arn:aws:s3:::realtimecloseapiscripts*",
+        "arn:aws:s3:::realtimecloseapimessages*"
+      ]
+    },
+    {
+      "Sid": "S3ArtifactStateAndLeadObjectReadWrite",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:GetObjectVersion",
+        "s3:DeleteObjectVersion",
+        "s3:GetObjectTagging",
+        "s3:PutObjectTagging"
+      ],
+      "Resource": [
+        "arn:aws:s3:::real-time-close-api-scripts*/*",
+        "arn:aws:s3:::real-time-close-api-messages*/*",
+        "arn:aws:s3:::realtimecloseapiscripts*/*",
+        "arn:aws:s3:::realtimecloseapimessages*/*"
+      ]
+    },
+    {
+      "Sid": "SQSProcessingAndDLQManagement",
+      "Effect": "Allow",
+      "Action": [
+        "sqs:CreateQueue",
+        "sqs:DeleteQueue",
+        "sqs:GetQueueAttributes",
+        "sqs:SetQueueAttributes",
+        "sqs:GetQueueUrl",
+        "sqs:ListQueueTags",
+        "sqs:TagQueue",
+        "sqs:UntagQueue",
+        "sqs:SetQueuePolicy",
+        "sqs:DeleteQueuePolicy"
+      ],
+      "Resource": "arn:aws:sqs:*:*:close-lead-pipeline-*"
+    },
+    {
+      "Sid": "APIGatewayWebhookManagement",
+      "Effect": "Allow",
+      "Action": [
+        "apigateway:GET",
+        "apigateway:POST",
+        "apigateway:PUT",
+        "apigateway:PATCH",
+        "apigateway:DELETE"
+      ],
+      "Resource": [
+        "arn:aws:apigateway:*::/restapis",
+        "arn:aws:apigateway:*::/restapis/*",
+        "arn:aws:apigateway:*::/tags/*"
+      ]
+    },
+    {
+      "Sid": "IAMRoleAndPolicyManagementForPipeline",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:GetRole",
+        "iam:UpdateRole",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:PassRole",
+        "iam:PutRolePolicy",
+        "iam:GetRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:ListInstanceProfilesForRole"
+      ],
+      "Resource": "arn:aws:iam::*:role/close-lead-pipeline-*"
+    },
+    {
+      "Sid": "LambdaAndSchedulerManagementForUpcomingSteps",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:*",
+        "scheduler:*",
+        "logs:CreateLogGroup",
+        "logs:DeleteLogGroup",
+        "logs:DescribeLogGroups",
+        "logs:PutRetentionPolicy",
+        "logs:TagResource",
+        "logs:UntagResource",
+        "logs:ListTagsForResource"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

@@ -1,0 +1,152 @@
+name: Deploy Lead Notification Pipeline
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "terraform/**"
+      - "scripts/**"
+      - ".github/workflows/deploy.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "terraform/**"
+      - "scripts/**"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+
+permissions:
+  id-token: write      # Required for requesting the AWS OIDC JWT token
+  contents: read       # Required for checking out the repository
+  pull-requests: write # Required if adding PR plan comments later
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  ARTIFACT_BUCKET_NAME: ${{ vars.ARTIFACT_BUCKET_NAME || 'real-time-close-api-scripts' }}
+  DATA_LAKE_BUCKET_NAME: ${{ vars.DATA_LAKE_BUCKET_NAME || 'real-time-close-api-messages' }}
+  GIT_COMMIT_SHA: ${{ github.sha }}
+  TF_VERSION: "1.10.5"
+
+jobs:
+  # ==========================================================================
+  # Job 1: Terraform Format, Init, Validate & Plan
+  # Uses `environment: production` so GitHub OIDC presents the `environment:production`
+  # subject claim and can read the `AWS_ROLE_ARN` environment secret.
+  # ==========================================================================
+  plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Normalize Bucket Names to Lowercase
+        id: buckets
+        shell: bash
+        run: |
+          echo "artifact_bucket=$(echo "${ARTIFACT_BUCKET_NAME}" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+          echo "data_lake_bucket=$(echo "${DATA_LAKE_BUCKET_NAME}" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Format Check
+        working-directory: terraform
+        run: terraform fmt -check
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ steps.buckets.outputs.artifact_bucket }}" \
+            -backend-config="region=${AWS_REGION}"
+
+      - name: Terraform Validate
+        working-directory: terraform
+        run: terraform validate
+
+      - name: Terraform Plan
+        working-directory: terraform
+        run: |
+          terraform plan \
+            -var="aws_region=${AWS_REGION}" \
+            -var="git_commit_sha=${GIT_COMMIT_SHA}" \
+            -var="artifact_bucket_name=${{ steps.buckets.outputs.artifact_bucket }}" \
+            -var="data_lake_bucket_name=${{ steps.buckets.outputs.data_lake_bucket }}" \
+            -out=tfplan
+
+      - name: Upload Terraform Plan Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: terraform/tfplan
+          retention-days: 5
+
+  # ==========================================================================
+  # Job 2: Terraform Apply & Sync Raw Python Scripts to SHA-Versioned Artifact Folder
+  # (Runs on merge/push to main or manual trigger under `environment: production`)
+  # ==========================================================================
+  apply:
+    name: Terraform Apply & Upload Artifacts
+    needs: plan
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Normalize Bucket Names to Lowercase
+        id: buckets
+        shell: bash
+        run: |
+          echo "artifact_bucket=$(echo "${ARTIFACT_BUCKET_NAME}" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+          echo "data_lake_bucket=$(echo "${DATA_LAKE_BUCKET_NAME}" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Download Terraform Plan Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: terraform
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ steps.buckets.outputs.artifact_bucket }}" \
+            -backend-config="region=${AWS_REGION}"
+
+      - name: Terraform Apply (Create/Update Infrastructure & Buckets First)
+        working-directory: terraform
+        run: terraform apply -auto-approve tfplan
+
+      - name: Sync Raw Python Scripts to S3 SHA-Versioned Artifact Folder (Post-Terraform)
+        shell: bash
+        run: |
+          BUCKET="${{ steps.buckets.outputs.artifact_bucket }}"
+          for fn in ingestion scheduler processing; do
+            echo "Syncing scripts/${fn}/ to s3://${BUCKET}/artifacts/${GIT_COMMIT_SHA}/lambda_functions/${fn}/src/..."
+            aws s3 sync "scripts/${fn}/" "s3://${BUCKET}/artifacts/${GIT_COMMIT_SHA}/lambda_functions/${fn}/src/"
+          done

@@ -31,6 +31,13 @@ override.tf.json
 
 # Include tfplan files to ignore the plan output of command: terraform plan -out=tfplan
 # example: *tfplan*
+*tfplan*
+
+# Ignore local build/packaging directories and Python cache
+build/
+*.zip
+__pycache__/
+*.py[cod]
 
 # Ignore CLI configuration files
 .terraformrc
@@ -42,3 +49,5 @@ terraform.rc
 # Optional: ignore plan files saved before destroying Terraform configuration
 # Uncomment the line below if you want to ignore planout files.
 # planout
+
+NotesAndBrainDump.ipynb

@@ -1,0 +1,22 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowGitHubActionsOIDCProductionEnvironment",
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::440107864885:oidc-provider/token.actions.githubusercontent.com"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+          "token.actions.githubusercontent.com:sub": [
+            "repo:chance221@39056884/RealTimeLeadNotificationPipeine@1454171498:environment:production",
+            "repo:chance221/RealTimeLeadNotificationPipeine:environment:production"
+          ]
+        }
+      }
+    }
+  ]
+}

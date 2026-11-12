@@ -48,7 +48,6 @@ def _fetch_and_validate_lead_owner_lookup(lead_id: str) -> LeadOwnerLookup:
     """
     Fetches the lead owner lookup JSON from the public S3 bucket:
       1. `https://dea-lead-owner.s3.us-east-1.amazonaws.com/{lead_id}.json`
-      2. `https://dea-lead-owner.s3.us-east-1.amazonaws.com/{lead_id}` (fallback)
     and validates the returned JSON against the `LeadOwnerLookup` Pydantic model.
     """
     candidate_urls = [

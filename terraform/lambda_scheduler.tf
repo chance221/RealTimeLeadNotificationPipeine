@@ -5,7 +5,7 @@
 variable "notification_delay_minutes" {
   description = "Number of minutes EventBridge Scheduler waits after a lead JSON lands in S3 before invoking the Processing Lambda"
   type        = number
-  default     = 10
+  default     = 30
 }
 
 # Dedicated EventBridge Schedule Group for clean organization & teardown

@@ -52,8 +52,7 @@ def _fetch_and_validate_lead_owner_lookup(lead_id: str) -> LeadOwnerLookup:
     and validates the returned JSON against the `LeadOwnerLookup` Pydantic model.
     """
     candidate_urls = [
-        f"{LEAD_OWNER_BASE_URL}/{lead_id}.json",
-        f"{LEAD_OWNER_BASE_URL}/{lead_id}",
+        f"{LEAD_OWNER_BASE_URL}/{lead_id}.json"
     ]
 
     last_error: Optional[Exception] = None
